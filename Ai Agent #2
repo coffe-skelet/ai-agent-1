@@ -1,0 +1,84 @@
+import telebot
+import google.generativeai as genai
+import os
+from collections import defaultdict
+
+# ================= НАСТРОЙКИ =================
+TELEGRAM_TOKEN = "ВАШ_TELEGRAM_BOT_TOKEN"
+GEMINI_API_KEY = "ВАШ_GEMINI_API_KEY"
+# =============================================
+
+# Настройка Gemini
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash') # Быстрая и умная модель
+
+# Инициализация бота
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+# Хранилище истории диалогов.
+# Структура: { user_id: [ {"role": "user", "parts": "..."}, {"role": "model", "parts": "..."} ] }
+user_history = defaultdict(list)
+
+# Максимальное количество сообщений в истории (чтобы не переполнять память и не тратить много токенов)
+MAX_HISTORY = 20
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(message, "Привет! Я ИИ-бот с памятью диалога. Задай мне любой вопрос, я запомню, о чём мы говорили.")
+
+@bot.message_handler(commands=['clear'])
+def clear_history(message):
+    """Очищает историю диалога для текущего пользователя"""
+    user_id = message.from_user.id
+    if user_id in user_history:
+        del user_history[user_id]
+    bot.reply_to(message, "🧹 История диалога очищена. Начинаем с чистого листа!")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    user_id = message.from_user.id
+    user_text = message.text
+    
+    # 1. Сообщаем пользователю, что бот "печатает"
+    bot.send_chat_action(message.chat.id, 'typing')
+    
+    # 2. Загружаем историю пользователя (или пустой список)
+    history = user_history[user_id]
+    
+    # 3. Создаем контекст для Gemini (превращаем нашу историю в формат чата)
+    # Gemini использует формат: модель 'model', пользователь 'user'
+    chat_session = model.start_chat(history=history)
+    
+    try:
+        # 4. Отправляем запрос и получаем ответ
+        response = chat_session.send_message(user_text)
+        bot_reply = response.text
+        
+        # 5. Сохраняем сообщение пользователя И ответ модели в нашу локальную историю
+        # Это важно для "памяти"
+        history.append({"role": "user", "parts": [user_text]})
+        history.append({"role": "model", "parts": [bot_reply]})
+        
+        # 6. Обрезаем историю, если она слишком длинная (удаляем самые старые пары)
+        if len(history) > MAX_HISTORY * 2: # *2 потому что пара user+model
+            # Оставляем только последние MAX_HISTORY сообщений пользователя и ответов
+            user_history[user_id] = history[-(MAX_HISTORY * 2):]
+        else:
+            user_history[user_id] = history
+            
+        # 7. Отправляем ответ пользователю
+        bot.reply_to(message, bot_reply)
+        
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        # Если произошла ошибка (например, блокировка контента), удаляем последний запрос из истории,
+        # чтобы бот не застрял в "сломанном" состоянии.
+        bot.reply_to(message, "⚠️ Извините, произошла ошибка при обращении к нейросети. Попробуйте перефразировать запрос или очистите историю командой /clear.")
+        # Удаляем "неудачный" кусок истории, если он успел добавиться
+        if len(history) >= 1 and history[-1]["role"] == "user":
+            history.pop()
+
+# ================= ЗАПУСК =================
+if __name__ == '__main__':
+    print("Бот запущен...")
+    bot.infinity_polling()
